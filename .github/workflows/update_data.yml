@@ -1,9 +1,12 @@
-name: Update Live TFL Journey Data
+name: Update TAPI Journey Data
 
 on:
   schedule:
-    # Runs every 5 minutes
-    - cron: "*/5 * * * *"
+    # Runs 8 times every day at the requested times (in UTC).
+    # Requested times: 6:30, 6:40, 6:50, 6:55, 7:00, 7:05, 7:10, 7:15
+    # Be sure these UTC times match your local (BST/GMT) needs!
+    - cron: "30,40,50,55 6 * * * "
+    - cron: "0,5,10,15 7 * * * "
   workflow_dispatch:
 
 jobs:
@@ -23,17 +26,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run TFL data update script
+      - name: Run TAPI data update script
         run: python update_journey_data.py
         env:
-          #  developer.transportapi.com API credentials 
-        TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}  # Match your provided ID
-        TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }} # Match your provided Key
+          # developer.transportapi.com API credentials 
+          TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}
+          TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }}
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "AUTO: Update TFL journey data"
+          commit_message: "AUTO: Update TAPI journey data"
           file_pattern: live_data.json
           commit_user_name: GitHub Actions Bot
           commit_user_email: actions@github.com
