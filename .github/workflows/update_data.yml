@@ -1,45 +1,53 @@
-name: Update Live TFL Journey Data
-
+name: Update Live Journey Data
 on:
+  push:
+    branches: [ main ]
   schedule:
-    # Runs every 5 minutes
-    - cron: "*/5 * * * *"
+    # Weekday runs (Mon-Fri) between 6:30 AM and 7:15 AM
+    - cron: '30 5 * * 1-5'
+    - cron: '40 5 * * 1-5'
+    - cron: '50 5 * * 1-5'
+    - cron: '55 5 * * 1-5'
+    - cron: '0 6 * * 1-5'
+    - cron: '5 6 * * 1-5'
+    - cron: '10 6 * * 1-5'
+    - cron: '15 6 * * 1-5'
+    # Weekend runs (Sat, Sun) for the direct train
+    - cron: '30 6 * * 6,0'
   workflow_dispatch:
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Set up Python 3.x
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v3
         with:
-          python-version: "3.x"
+          python-version: '3.x'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Installs 'requests' and 'nre-darwin-py' from requirements.txt
-          pip install -r requirements.txt
+          # REQUIRED: Install the 'zeep' library for Darwin SOAP calls
+          pip install requests zeep
 
-      - name: Run TFL data update script
+      - name: Run Darwin data update script
         run: python update_journey_data.py
         env:
-          # TFL API credentials (optional but recommended for higher rate limits)
-          TFL_APP_ID: ${{ secrets.TFL_APP_ID }}
-          TFL_APP_KEY: ${{ secrets.TFL_APP_KEY }}
-          # DARWIN API Key is securely passed as an environment variable
-          DARWIN_API_KEY: ${{ secrets.DARWIN_API_KEY }}
-
-      - name: Commit and push changes
+          # TAPI keys are no longer used by the Darwin logic, but we keep them set.
+          TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}
+          TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }}
+          
+      - name: Commit and push if data changed
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "AUTO: Update TFL journey data"
+          commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
-          commit_user_name: GitHub Actions Bot
-          commit_user_email: actions@github.com
+
 
 
 
