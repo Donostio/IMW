@@ -26,9 +26,9 @@ jobs:
       - name: Run TFL data update script
         run: python update_journey_data.py
         env:
-          # TFL API credentials (optional but recommended for higher rate limits)
-          TFL_APP_ID: ${{ secrets.TFL_APP_ID }}
-          TFL_APP_KEY: ${{ secrets.TFL_APP_KEY }}
+          #  developer.transportapi.com API credentials 
+        TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}  # Match your provided ID
+        TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }} # Match your provided Key
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
