@@ -1,5 +1,4 @@
 name: Update Live Journey Data
-
 on:
   schedule:
     # Weekday runs (Monday to Friday, 06:30, 06:40, 06:50, 06:55, 07:00, 07:05, 07:10, 07:15 UTC)
@@ -49,6 +48,7 @@ jobs:
         with:
           commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
+
 
 
 
