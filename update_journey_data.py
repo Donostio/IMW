@@ -4,309 +4,299 @@ import requests
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-TFL_APP_ID = os.getenv("TFL_APP_ID", "")
-TFL_APP_KEY = os.getenv("TFL_APP_KEY", "")
+# Your provided TAPI credentials
+TAPI_APP_ID = "49724146"  
+TAPI_APP_KEY = "3d1ee7a7d50d2fda9e8fc8e3dbc58255"
 OUTPUT_FILE = "live_data.json"
 
-# Journey parameters
-ORIGIN = "Streatham Common Rail Station"
-DESTINATION = "Imperial Wharf Rail Station"
+# Journey parameters (using CRS codes for reliability)
+ORIGIN_CRS = "SRC" # Streatham Common
+DESTINATION_CRS = "IMW" # Imperial Wharf
+# Note: TAPI Journey Planner works best with CRS codes for train-heavy routes.
 
-# TFL API endpoint
-TFL_BASE_URL = "https://api.tfl.gov.uk"
+# TAPI API endpoint
+TAPI_BASE_URL = "https://transportapi.com"
 NUM_JOURNEYS = 4 # Target the next four journeys
 
 # --- Utility Functions ---
 
 def get_journey_plan(origin, destination):
-    """Fetch journey plans from TFL Journey Planner API and log the full response."""
-    url = f"{TFL_BASE_URL}/Journey/JourneyResults/{origin}/to/{destination}"
+    """
+    Step 1: Fetch scheduled journey plans from TAPI Journey Planner. (1 API Call)
+    Returns scheduled routes.
+    """
+    url = f"{TAPI_BASE_URL}/v3/uk/public_journey.json"
     
     params = {
-        "mode": "overground,national-rail",
-        "timeIs": "Departing",
-        "journeyPreference": "LeastTime",
-        "alternativeRoute": "true"
+        "from": origin,
+        "to": destination,
+        "modes": "train",
+        "service": "silverrail", # Use Silverrail for comprehensive coverage
+        "app_id": TAPI_APP_ID,
+        "app_key": TAPI_APP_KEY
     }
     
-    if TFL_APP_ID and TFL_APP_KEY:
-        params["app_id"] = TFL_APP_ID
-        params["app_key"] = TFL_APP_KEY
-    
     try:
-        print(f"[{datetime.now().isoformat()}] Fetching journeys from {origin} to {destination}...")
+        print(f"[{datetime.now().isoformat()}] Step 1: Fetching scheduled journeys from {origin} to {destination}...")
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         
         json_data = response.json()
         
         # --- VERBOSE LOGGING ---
+        # NOTE: This logging is kept to show the raw data fetched by the new API.
         print("\n" + "="*80)
-        print(">>> START TFL RAW JSON RESPONSE <<<")
-        print(json.dumps(json_data, indent=2))
-        print(">>> END TFL RAW JSON RESPONSE <<<")
+        print(">>> START TAPI JOURNEY PLANNER RAW JSON RESPONSE (Truncated) <<<")
+        print(json.dumps(json_data, indent=2)[:2000] + "...") 
+        print(">>> END TAPI JOURNEY PLANNER RAW JSON RESPONSE <<<")
         print("="*80 + "\n")
         # --- END VERBOSE LOGGING ---
         
         return json_data
         
     except requests.exceptions.RequestException as e:
-        print(f"ERROR: Failed to fetch TFL data: {e}")
+        print(f"ERROR: Failed to fetch TAPI Journey Planner data: {e}")
         return None
 
-
-def parse_datetime(dt_string):
-    """Parse TFL datetime string."""
-    try:
-        return datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
-    except (ValueError, AttributeError):
-        return None
-
-
-def format_time(dt):
-    """Format datetime to HH:MM."""
-    if dt:
-        return dt.strftime("%H:%M")
-    return "N/A"
-
-
-def extract_platform_from_instruction(instruction_text):
-    """Try to extract platform from instruction text (LAST RESORT fallback)."""
-    if not instruction_text:
-        return None
-    
-    text_lower = instruction_text.lower()
-    
-    # Look for "platform X" pattern
-    if 'platform' in text_lower:
-        parts = text_lower.split('platform')
-        if len(parts) > 1:
-            after = parts[1].strip()
-            platform = ''
-            for char in after:
-                # Allows for digits and single letters (e.g., Platform 1a)
-                if char.isdigit() or (char.isalpha() and len(platform) == 1):
-                    platform += char
-                elif platform:
-                    break
-            if platform:
-                return platform.upper()
-    return None
-
-
-def get_platform_from_leg(leg, is_departure=False):
+def get_live_departures(station_code):
     """
-    Tries to extract platform from the leg details (TFL specific fields).
-    Prioritizes the 'indicator' field, which often holds the platform number.
+    Step 2: Fetch live departure board data for a specific station (Streatham Common). (1 API Call)
+    Returns real-time service information including platforms and delays.
     """
+    # Use 'datetime' parameter to get current/future departures around now
+    now_utc = datetime.utcnow().isoformat() + 'Z'
     
-    # Define the point we are checking (Departure or Arrival)
-    point = leg.get('departurePoint' if is_departure else 'arrivalPoint', {})
+    url = f"{TAPI_BASE_URL}/v3/uk/train/station/{station_code}/actual_journeys.json"
     
-    # 1. PRIMARY CHECK: Check the 'indicator' field 
-    if point.get('indicator'):
-        platform_indicator = str(point['indicator']).upper()
-        if platform_indicator and platform_indicator != 'TBC':
-            return platform_indicator
-
-    # 2. Secondary Check: Check the 'platform' field 
-    if point.get('platform'):
-        platform_val = str(point['platform']).upper()
-        if platform_val and platform_val != 'TBC':
-            return platform_val
-
-    # 3. Tertiary Check: Check the 'platformName' field 
-    if point.get('platformName'):
-        name = str(point['platformName'])
-        if "Platform" in name:
-             platform_name_extracted = name.split('Platform')[-1].strip().upper()
-             if platform_name_extracted:
-                return platform_name_extracted
-        elif name and name.isalnum(): 
-            return name.upper()
-    
-    # 4. Fallback to Instruction Text (Least reliable)
-    instruction = leg.get('instruction', {})
-    instruction_text = instruction.get('detailed', instruction.get('summary', ''))
-    
-    platform_from_text = extract_platform_from_instruction(instruction_text)
-    if platform_from_text:
-        return platform_from_text
-        
-    return None
-
-# --- New/Modified Core Logic ---
-
-def process_journey(journey, journey_id):
-    """Process a TFL journey for direct or two-train routes."""
-    start_time = parse_datetime(journey.get('startDateTime'))
-    arrival_time = parse_datetime(journey.get('arrivalDateTime'))
-    duration_mins = journey.get('duration', 0)
-    
-    legs = journey.get('legs', [])
-    
-    # Filter for only rail legs (National Rail or Overground)
-    rail_legs = [
-        leg for leg in legs 
-        if leg.get('mode', {}).get('name', '') in ['national-rail', 'overground']
-    ]
-    
-    if not rail_legs:
-        return None
-    
-    # Check for multi-modal (non-train/non-walk) legs which should be excluded
-    allowed_modes = ['walking', 'walk', 'national-rail', 'overground']
-    if any(leg.get('mode', {}).get('name', '') not in allowed_modes for leg in legs):
-        return None
-
-    # --- REVISED STATUS LOGIC: Focus ONLY on Timing Delays ---
-    status = "On Time"
-    
-    # Check if any leg has an explicitly reported arrival delay greater than 60 seconds (1 minute).
-    # This filters out minor fluctuations and general station advisories.
-    has_explicit_delay = any(
-        leg.get('arrivalPoint', {}).get('timing', {}).get('arrivalDelay', 0) > 60 
-        for leg in legs
-    )
-    
-    if has_explicit_delay:
-        status = "Delayed" 
-    # --- END REVISED STATUS LOGIC ---
-            
-    processed_legs = []
-    transfer_mins = 0
-
-    # --- Direct Train (1 rail leg) ---
-    if len(rail_legs) == 1:
-        leg1 = rail_legs[0]
-        leg1_depart = parse_datetime(leg1.get('departureTime'))
-        leg1_arrive = parse_datetime(leg1.get('arrivalTime'))
-        leg1_route = leg1.get('routeOptions', [])
-        leg1_line = leg1_route[0].get('name', 'Rail') if leg1_route else 'Rail'
-        
-        # Departure platform (at Streatham Common)
-        leg1_platform = get_platform_from_leg(leg1, is_departure=True)
-        
-        processed_legs.append({
-            "origin": "Streatham Common",
-            "destination": "Imperial Wharf",
-            "departure": format_time(leg1_depart),
-            "arrival": format_time(leg1_arrive),
-            "departurePlatform": leg1_platform or "TBC",
-            "operator": leg1_line,
-            "status": status
-        })
-
-    # --- Two-Train Journey (2 rail legs) ---
-    elif len(rail_legs) == 2:
-        
-        # Leg 1: Streatham Common to Interchange (e.g. Clapham Junction)
-        leg1 = rail_legs[0]
-        leg1_depart = parse_datetime(leg1.get('departureTime'))
-        leg1_arrive = parse_datetime(leg1.get('arrivalTime'))
-        leg1_route = leg1.get('routeOptions', [])
-        leg1_line = leg1_route[0].get('name', 'Rail') if leg1_route else 'Rail'
-
-        # Leg 2: Interchange to Imperial Wharf
-        leg2 = rail_legs[1]
-        leg2_depart = parse_datetime(leg2.get('departureTime'))
-        leg2_arrive = parse_datetime(leg2.get('arrivalTime'))
-        leg2_route = leg2.get('routeOptions', [])
-        leg2_line = leg2_route[0].get('name', 'Rail') if leg2_route else 'Rail'
-
-        # Interchange Station (e.g., Clapham Junction)
-        interchange = leg1.get('arrivalPoint', {}).get('commonName', 'Interchange')
-
-        # Platform Extraction at Interchange
-        leg1_arrival_platform = get_platform_from_leg(leg1, is_departure=False)
-        leg2_departure_platform = get_platform_from_leg(leg2, is_departure=True)
-
-        # Calculate transfer time
-        if leg1_arrive and leg2_depart:
-            transfer_mins = int((leg2_depart - leg1_arrive).total_seconds() / 60)
-        
-        # First Train Leg
-        processed_legs.append({
-            "origin": "Streatham Common",
-            "destination": interchange,
-            "departure": format_time(leg1_depart),
-            "arrival": format_time(leg1_arrive),
-            "arrivalPlatform_ClaphamJunction": leg1_arrival_platform or "TBC",
-            "operator": leg1_line,
-            "status": status
-        })
-        
-        # Transfer Detail
-        processed_legs.append({
-            "type": "transfer",
-            "location": interchange,
-            "transferTime": f"{transfer_mins} min"
-        })
-        
-        # Second Train Leg
-        processed_legs.append({
-            "origin": interchange,
-            "destination": "Imperial Wharf",
-            "departure": format_time(leg2_depart),
-            "arrival": format_time(leg2_arrive),
-            "departurePlatform_ClaphamJunction": leg2_departure_platform or "TBC",
-            "operator": leg2_line,
-            "status": status
-        })
-
-    else:
-        # Exclude journeys with 0, 3, or more rail legs
-        return None
-
-    return {
-        "id": journey_id,
-        "type": "Direct" if len(rail_legs) == 1 else "One Change",
-        "departureTime": format_time(start_time),
-        "arrivalTime": format_time(arrival_time),
-        "totalDuration": f"{duration_mins} min",
-        "status": status,
-        "live_updated_at": datetime.now().strftime("%H:%M:%S"),
-        "legs": processed_legs
+    params = {
+        "station": station_code,
+        "datetime": now_utc,
+        "from_offset": "-PT00:05:00", # Look 5 min in the past
+        "to_offset": "PT02:00:00",    # Look 2 hours in the future
+        "type": "departure",
+        "limit": 20,                  # Get enough services to match against
+        "expected": "true",           # Ensure we get the expected times
+        "app_id": TAPI_APP_ID,
+        "app_key": TAPI_APP_KEY
     }
+    
+    try:
+        print(f"[{datetime.now().isoformat()}] Step 2: Fetching live departures for {station_code}...")
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        live_data = response.json()
+        
+        return live_data.get('member', [])
+        
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to fetch TAPI Live Departure Board data: {e}")
+        return []
+
+def format_time(time_str):
+    """Formats time to HH:MM from TAPI's 'HH:MM' string."""
+    return time_str if time_str else "N/A"
+        
+def parse_duration(duration_str):
+    """Converts 'HH:MM:SS' to minutes."""
+    try:
+        h, m, s = map(int, duration_str.split(':'))
+        return h * 60 + m
+    except ValueError:
+        return 0
+        
+def time_to_seconds(time_str):
+    """Converts 'HH:MM' string to total seconds for comparison."""
+    if not time_str: return -1
+    try:
+        h, m = map(int, time_str.split(':'))
+        return h * 3600 + m * 60
+    except ValueError:
+        return -1
 
 
-def fetch_and_process_tfl_data(num_journeys):
-    """Fetch and process TFL journey data for a fixed number of valid train journeys."""
+def find_live_data(scheduled_departure_time, live_departures):
+    """
+    Matches the scheduled time (from Journey Planner) to a live service (from LDB).
+    This implements the strict "time not as planned" status logic.
+    """
     
-    journey_data = get_journey_plan(ORIGIN, DESTINATION)
+    # Scheduled time in seconds for easy comparison
+    scheduled_seconds = time_to_seconds(scheduled_departure_time)
     
-    if not journey_data or 'journeys' not in journey_data:
-        print("ERROR: No journey data received from TFL API")
+    # Default return for no match
+    default_live = {"status": "On Time", "platform": "TBC", "live_time": scheduled_departure_time}
+
+    # Match within a 2-minute window of the aimed (scheduled) time
+    for service in live_departures:
+        aimed_time_str = service.get('aimed', {}).get('departure', {}).get('time')
+        
+        if not aimed_time_str:
+            continue
+            
+        aimed_seconds = time_to_seconds(aimed_time_str)
+        
+        # Use an error margin of 2 minutes (120 seconds) for matching
+        if abs(scheduled_seconds - aimed_seconds) <= 120:
+            
+            platform = service.get('platform') or "TBC"
+            
+            # --- STRICT STATUS LOGIC: Check for delay or cancellation ---
+            is_cancelled = service.get('cancelled', False)
+            running_late = service.get('service', {}).get('running_late')
+
+            # Get the expected time for the live status
+            expected_time_str = service.get('expected', {}).get('departure', {}).get('time')
+            
+            if is_cancelled:
+                status = "Canceled"
+                live_time = "N/A"
+            elif expected_time_str and expected_time_str != aimed_time_str:
+                # Flag as 'Delayed' only if the expected time is different from the aimed time
+                status = "Delayed"
+                live_time = expected_time_str
+            else:
+                # If times match or service is just running_late but the actual time is still "on time"
+                status = "On Time"
+                live_time = aimed_time_str
+
+            return {"status": status, "platform": platform, "live_time": live_time}
+            
+    return default_live
+
+# --- Core Logic ---
+
+def process_journey_data(journey_data):
+    """Extract and format journey data from TAPI response."""
+    routes = journey_data.get('routes', [])
+    processed_journeys = []
+    
+    # Fetch live departures once for the current time window for the origin station (SRC)
+    live_departures_src = get_live_departures(ORIGIN_CRS)
+    
+    print(f"Found {len(live_departures_src)} live train services departing {ORIGIN_CRS}.")
+    
+    for idx, route in enumerate(routes, 1):
+        if len(processed_journeys) >= NUM_JOURNEYS:
+            break
+            
+        # Overall Journey Details
+        total_duration = parse_duration(route.get('duration', '00:00:00'))
+        scheduled_departure_time = route.get('departure_time')
+        scheduled_arrival_time = route.get('arrival_time')
+        
+        route_parts = route.get('route_parts', [])
+        train_legs = [part for part in route_parts if part.get('mode') == 'train']
+        
+        if not train_legs:
+            continue
+
+        # Get live data for the first train leg leaving Streatham Common
+        first_train_leg = train_legs[0]
+        live_info = find_live_data(first_train_leg.get('departure_time'), live_departures_src)
+        
+        processed_legs = []
+        
+        # --- Handle Legs ---
+        
+        if len(train_legs) == 1:
+            # Direct Train
+            processed_legs.append({
+                "origin": "Streatham Common",
+                "destination": "Imperial Wharf",
+                "scheduledDeparture": format_time(scheduled_departure_time),
+                "liveDeparture": live_info['live_time'],
+                "scheduledArrival": format_time(scheduled_arrival_time),
+                "departurePlatform": live_info['platform'],
+                "operator": first_train_leg.get('operator_name', 'Rail'),
+                "status": live_info['status']
+            })
+
+        elif len(train_legs) == 2:
+            # Two-Train Journey
+            leg1 = train_legs[0]
+            leg2 = train_legs[1]
+            
+            transfer_leg = next((part for part in route_parts if part.get('mode') == 'foot' and 
+                                 part.get('from_point_name') == leg1.get('to_point_name')), None)
+            
+            interchange = leg1.get('to_point_name', 'Clapham Junction')
+            transfer_mins = parse_duration(transfer_leg.get('duration', '00:00:00')) if transfer_leg else 0
+            
+            # Leg 1: Streatham Common to Interchange (Live data applied here)
+            processed_legs.append({
+                "origin": "Streatham Common",
+                "destination": interchange,
+                "scheduledDeparture": leg1.get('departure_time'),
+                "liveDeparture": live_info['live_time'],
+                "scheduledArrival": leg1.get('arrival_time'),
+                "departurePlatform": live_info['platform'],
+                "operator": leg1.get('operator_name', 'Rail'),
+                "status": live_info['status']
+            })
+            
+            # Transfer Detail
+            processed_legs.append({
+                "type": "transfer",
+                "location": interchange,
+                "transferTime": f"{transfer_mins} min"
+            })
+            
+            # Leg 2: Interchange to Imperial Wharf (Only schedule is used, as we didn't query CLJ LDB)
+            processed_legs.append({
+                "origin": interchange,
+                "destination": "Imperial Wharf",
+                "scheduledDeparture": leg2.get('departure_time'),
+                "liveDeparture": leg2.get('departure_time'), # Use scheduled time as live if no LDB call
+                "scheduledArrival": leg2.get('arrival_time'),
+                "departurePlatform_Interchange": "TBC (Scheduled)", 
+                "operator": leg2.get('operator_name', 'Rail'),
+                "status": "On Time" 
+            })
+            
+        else:
+            continue
+            
+        
+        processed_journeys.append({
+            "id": idx,
+            "type": "Direct" if len(train_legs) == 1 else "One Change",
+            "scheduledDepartureTime": format_time(scheduled_departure_time),
+            "scheduledArrivalTime": format_time(scheduled_arrival_time),
+            "totalDuration": f"{total_duration} min",
+            "overallStatus": live_info['status'], # Status based on the first leg's live data
+            "live_updated_at": datetime.now().strftime("%H:%M:%S"),
+            "legs": processed_legs
+        })
+        
+    return processed_journeys
+
+
+def fetch_and_process_tapi_data(num_journeys):
+    """Main function to fetch and process TAPI data."""
+    
+    # 1. TAPI Journey Planner Call
+    journey_data = get_journey_plan(ORIGIN_CRS, DESTINATION_CRS)
+    
+    if not journey_data or 'routes' not in journey_data:
+        print("ERROR: No route data received from TAPI Journey Planner.")
         return []
     
-    journeys = journey_data.get('journeys', [])
-    print(f"Found {len(journeys)} total journeys from TFL in the response.")
+    # 2. Process and enrich with Live Data
+    data = process_journey_data(journey_data)
     
-    processed = []
-    for idx, journey in enumerate(journeys, 1):
-        try:
-            processed_journey = process_journey(journey, len(processed) + 1)
-            if processed_journey:
-                processed.append(processed_journey)
-                print(f"✓ Journey {len(processed)} ({processed_journey['type']}): {processed_journey['departureTime']} → {processed_journey['arrivalTime']} | Status: {processed_journey['status']}")
-                
-                if len(processed) >= num_journeys:
-                    break
-        except Exception as e:
-            print(f"ERROR processing journey {idx}: {e}")
-            continue
-    
-    print(f"Successfully processed {len(processed)} train journeys (Direct or One Change)")
-    return processed
+    print(f"Successfully processed {len(data)} train journeys.")
+    return data
 
 
 def main():
-    data = fetch_and_process_tfl_data(NUM_JOURNEYS)
+    data = fetch_and_process_tapi_data(NUM_JOURNEYS)
     
     if data:
         with open(OUTPUT_FILE, 'w') as f:
             json.dump(data, f, indent=4)
         print(f"\n✓ Successfully saved {len(data)} journeys to {OUTPUT_FILE}")
+        print(f"Total API calls per run: 2 (1 Journey Planner + 1 Live Board).")
     else:
         print("\n⚠ No journey data generated.")
 
