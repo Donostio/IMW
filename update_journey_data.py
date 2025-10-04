@@ -42,6 +42,7 @@ try:
         print("⚠ Darwin API Key missing. Platform and live arrival data will not be available.")
 except Exception as e:
     DARWIN_SESSION = None
+    # This often indicates a transient network/WSDL parsing issue, but we proceed with TFL data
     print(f"ERROR initializing Darwin Session: {e}")
 
 
@@ -64,15 +65,11 @@ def get_journey_plan(origin, destination):
     
     try:
         print(f"[{datetime.now().isoformat()}] Fetching journeys from {origin} to {destination}...")
-        response = requests.get(url, params=params, timeout=10)
+        # INCREASED TIMEOUT to 30 seconds to prevent Read timed out error
+        response = requests.get(url, params=params, timeout=30) 
         response.raise_for_status()
         
         json_data = response.json()
-        
-        # --- VERBOSE LOGGING ---
-        # print(f"API Response Status: {response.status_code}")
-        # print(f"Response Keys: {json_data.keys()}")
-        # -----------------------
         
         return json_data
         
