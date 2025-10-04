@@ -16,7 +16,7 @@ on:
   - cron: '30 6 * * 6,0' # Saturday and Sunday at 07:30 BST (6:30 UTC)
 
   # Allows manual run from the GitHub Actions tab
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   update-data:
@@ -48,6 +48,7 @@ jobs:
         with:
           commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
+
 
 
 
