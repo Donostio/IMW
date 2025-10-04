@@ -1,44 +1,58 @@
-name: Update TAPI Journey Data
+name: Update Live Journey Data
 
 on:
+  # Schedule to run at the specific times requested (Mon-Fri)
   schedule:
-    # Runs 8 times every day at the requested times (in UTC).
-    # Requested times: 6:30, 6:40, 6:50, 6:55, 7:00, 7:05, 7:10, 7:15
-    # Be sure these UTC times match your local (BST/GMT) needs!
-    - cron: "30,40,50,55 6 * * * "
-    - cron: "0,5,10,15 7 * * * "
+    # Weekday runs (Monday to Friday, 06:30, 06:40, 06:50, 06:55, 07:00, 07:05, 07:10, 07:15 UTC)
+    # The API calls themselves use datetime.now() so they search for current trains.
+    # Note: Times are UTC. London is UTC+1 during BST, so 06:30 UTC is 07:30 BST (too late for 6:30 run)
+    # Adjusting to run 1 hour earlier to match desired 6:30 AM BST start.
+    # 05:30 UTC is 06:30 BST
+    - cron: '30 5 * * 1-5' # 06:30 BST
+    - cron: '40 5 * * 1-5' # 06:40 BST
+    - cron: '50 5 * * 1-5' # 06:50 BST
+    - cron: '55 5 * * 1-5' # 06:55 BST
+    - cron: '0 6 * * 1-5'  # 07:00 BST
+    - cron: '5 6 * * 1-5'  # 07:05 BST
+    - cron: '10 6 * * 1-5' # 07:10 BST
+    - cron: '15 6 * * 1-5' # 07:15 BST
+  
+  # Run once a day on Saturday and Sunday to catch the weekend logic
+  - cron: '30 6 * * 6,0' # Saturday and Sunday at 07:30 BST (6:30 UTC)
+
+  # Allows manual run from the GitHub Actions tab
   workflow_dispatch:
 
 jobs:
   update-data:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Set up Python 3.x
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v3
         with:
-          python-version: "3.x"
+          python-version: '3.x'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests
 
       - name: Run TAPI data update script
         run: python update_journey_data.py
         env:
-          # developer.transportapi.com API credentials 
+          # IMPORTANT: These securely pull the values from your repository secrets
           TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}
           TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }}
-
-      - name: Commit and push changes
+          
+      - name: Commit and push if data changed
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "AUTO: Update TAPI journey data"
+          commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
-          commit_user_name: GitHub Actions Bot
-          commit_user_email: actions@github.com
+
 
 
