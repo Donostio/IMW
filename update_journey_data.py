@@ -1,14 +1,21 @@
+
+
+
 import json
 import os
 from datetime import datetime, timedelta, time as time_obj
 import time
+# Import requests for robust transport handling
+import requests 
 from zeep import Client, Settings
 from zeep.exceptions import Fault
-from zeep.transports import Transport
+# Import Transport explicitly for robust connection setup
+from zeep.transports import Transport 
 
 # --- Darwin API Configuration (Official Live Data) ---
-# NOTE: Your Darwin token is hardcoded here, as requested.
-DARWIN_TOKEN = "8aaaf362-b5d6-4886-9c24-08e137bd4a7b"
+# NOTE: Your Darwin token must be set as a secret named DARWIN_TOKEN in your GitHub repository
+# and passed to the action environment. The token is retrieved from the environment variable.
+DARWIN_TOKEN = os.environ.get("DARWIN_TOKEN")
 DARWIN_WSDL = "https://lite.realtime.nationalrail.co.uk/OpenLDBWS/ldb.asmx?WSDL"
 
 # --- CRS Codes (National Rail Stations) ---
@@ -20,21 +27,33 @@ MAX_RETRIES = 5
 
 def create_darwin_client():
     """Initializes the Darwin SOAP client with the required token."""
+    
+    # Check if the token is available
+    if not DARWIN_TOKEN:
+        print("ERROR: DARWIN_TOKEN environment variable is missing. Please set it as a GitHub Secret.")
+        return None
+        
+    # Use a requests Session and Transport to ensure robust connection, 
+    # helping to avoid unexpected 401 errors during WSDL fetch.
+    session = requests.Session()
+    transport = Transport(session=session, timeout=10) # Set a 10-second timeout for safety
+    
     try:
         # Zeep settings for robust parsing
         settings = Settings(strict=False, xml_huge_tree=True)
         
-        # Initialize the client using the WSDL definition
-        client = Client(DARWIN_WSDL, settings=settings)
+        # Initialize the client using the WSDL definition and the custom transport
+        client = Client(DARWIN_WSDL, settings=settings, transport=transport)
         
         # Create the SOAP header structure containing the access token
         header = client.get_element('ns0:AccessToken')
         token_header = header(TokenValue=DARWIN_TOKEN)
         
-        # Set the header on the client object for all future calls
+        # Set the header on the client object for all future calls (this is the actual authentication)
         client.set_default_header(token_header)
         return client
     except Exception as e:
+        # Catch connection and initialization errors
         print(f"ERROR: Failed to initialize Darwin client: {e}")
         return None
 
@@ -61,6 +80,7 @@ def get_darwin_departure_board(client, crs_code, time_offset_minutes=0, time_win
             )
             
             # The response is a complex Zeep object, we convert it to a dict for easier parsing
+            # We use json.dumps/loads as a reliable way to serialize the Zeep object
             return json.loads(json.dumps(response, default=lambda o: getattr(o, '__dict__', str(o))))
             
         except Fault as e:
@@ -178,91 +198,11 @@ def process_morning_data():
     result_data = {"query_time": now.isoformat(), "journeys": []}
     
     darwin_client = create_darwin_client()
-    if not darwin_client: return
+    if not darwin_client: 
+        print("Exiting script due to Darwin client initialization failure.")
+        return
 
     # --- Determine the earliest time we care about today ---
     if is_weekend:
         target_start_time = "07:20"
     else:
-        target_start_time = "07:25"
-    
-    # --- API Lookahead is handled by the GitHub Action schedule running near the target time ---
-    time_offset_minutes = 0 # Look 0 minutes ahead (start now)
-    
-    if is_weekend:
-        # Weekend: Direct SRC to IMW after 07:20
-        print(f"Running Weekend Logic (Direct train after {target_start_time} via Darwin)")
-        
-        # 1. Fetch LDB for Streatham Common (SRC)
-        src_ldb = get_darwin_departure_board(darwin_client, STREATHAM_COMMON_CRS, time_offset_minutes=time_offset_minutes)
-        if not src_ldb: return
-
-        # 2. Find the first direct train from SRC to IMW after 07:20
-        direct_trains = find_trains_for_leg(
-            src_ldb, 
-            IMPERIAL_WHARF_CRS, 
-            target_start_time, 
-            max_results=1
-        )
-
-        result_data["journeys"].extend([{"leg1": t} for t in direct_trains])
-        
-    else: # Weekday logic
-        # Weekday: SRC to CLJ, then CLJ to IMW (next two indirect after 07:25)
-        print(f"Running Weekday Logic (2 indirect journeys after {target_start_time} via Darwin)")
-        
-        # 1. Fetch LDB for Streatham Common (SRC)
-        src_ldb = get_darwin_departure_board(darwin_client, STREATHAM_COMMON_CRS, time_offset_minutes=time_offset_minutes)
-        if not src_ldb: return
-
-        # 2. Find the next two trains from SRC going via Clapham Junction (CLJ) after 07:25
-        first_leg_trains = find_trains_for_leg(
-            src_ldb, 
-            CLAPHAM_JUNCTION_CRS, 
-            target_start_time, 
-            max_results=2
-        )
-
-        for leg1 in first_leg_trains:
-            # 3. Estimate Connection Time at CLJ
-            # We assume a 10 minute journey from SRC to CLJ + 5 min connection buffer = 15 mins total.
-            
-            try:
-                # Use the scheduled departure time (aimed_dep) for the calculation
-                dep_dt = datetime.strptime(f"{target_date} {leg1['aimed_dep']}", "%Y-%m-%d %H:%M")
-                earliest_connection_dt = dep_dt + timedelta(minutes=15)
-                connection_time_str = earliest_connection_dt.strftime("%H:%M")
-            except:
-                 # Fallback to current time if parsing fails
-                 connection_time_str = now.strftime("%H:%M") 
-
-            # 4. Fetch LIVE LDB for Clapham Junction (CLJ)
-            clj_ldb = get_darwin_departure_board(darwin_client, CLAPHAM_JUNCTION_CRS)
-            if not clj_ldb: continue
-
-            # 5. Find the next available train from CLJ to IMW after the estimated connection time
-            connection_trains = find_trains_for_leg(
-                clj_ldb, 
-                IMPERIAL_WHARF_CRS, 
-                connection_time_str, 
-                max_results=1
-            )
-
-            if connection_trains:
-                result_data["journeys"].append({
-                    "leg1": leg1,
-                    "leg2": connection_trains[0]
-                })
-
-    # --- Save Data to JSON File ---
-    try:
-        with open('live_data.json', 'w') as f:
-            json.dump(result_data, f, indent=4)
-        print(f"Successfully saved {len(result_data['journeys'])} journeys to live_data.json using Darwin.")
-    except Exception as e:
-        print(f"ERROR: Failed to write to live_data.json: {e}")
-
-if __name__ == "__main__":
-    process_morning_data()
-
-
