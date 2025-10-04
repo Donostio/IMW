@@ -30,6 +30,21 @@ DESTINATION = "Imperial Wharf Rail Station"
 TFL_BASE_URL = "https://api.tfl.gov.uk"
 NUM_JOURNEYS = 4 # Target the next four journeys
 
+# --- Darwin Session Initialization ---
+try:
+    if DARWIN_API_KEY:
+        DARWIN_SESSION = DarwinLdbSession(
+            wsdl=DARWIN_WSDL, 
+            api_key=DARWIN_API_KEY
+        )
+        print("✓ Darwin LDB Session initialized.")
+    else:
+        DARWIN_SESSION = None
+        print("⚠ Darwin API Key missing. Platform and live arrival data will not be available.")
+except Exception as e:
+    DARWIN_SESSION = None
+    print(f"ERROR initializing Darwin Session: {e}")
+    
 # --- Utility Functions ---
 
 def get_journey_plan(origin, destination):
