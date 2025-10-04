@@ -1,32 +1,38 @@
 import os
 import json
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- Configuration ---
-# Your provided TAPI credentials (Hardcoded for simplicity)
-TAPI_APP_ID = "49724146"  
-TAPI_APP_KEY = "3d1ee7a7d50d2fda9e8fc8e3dbc58255"
-OUTPUT_FILE = "live_data.json"
+# --- Configuration & Credentials ---
+
+# Fetch credentials from GitHub Actions environment variables
+# These must be set as TAPI_APP_ID and TAPI_APP_KEY in your GitHub Secrets.
+TAPI_APP_ID = os.environ.get("TAPI_APP_ID")
+TAPI_APP_KEY = os.environ.get("TAPI_APP_KEY")
+
+# Check that they were retrieved (CRITICAL FIX for the 403 error)
+if not TAPI_APP_ID or not TAPI_APP_KEY:
+    # If keys are missing, print an error and stop execution immediately
+    print("CRITICAL ERROR: TAPI credentials not found in environment variables. Stopping.")
+    exit(1)
+
+OUTPUT_FILE = "live_data.json" 
+TAPI_BASE_URL = "https://transportapi.com"
 
 # Journey parameters (using CRS codes for reliability)
 ORIGIN_CRS = "SRC" # Streatham Common
 DESTINATION_CRS = "IMW" # Imperial Wharf
-# Note: The actual journey filter logic is implemented in the main function.
-
-# TAPI API endpoint
-TAPI_BASE_URL = "https://transportapi.com"
 
 # --- Utility Functions ---
 
 def get_journey_plan(origin, destination, time_str):
     """
-    Step 1: Fetch scheduled journey plans from TAPI Journey Planner.
+    Step 1: Fetch scheduled journey plans from TAPI Journey Planner. (1 API Call)
     The time_str dictates when the search begins.
     """
     url = f"{TAPI_BASE_URL}/v3/uk/public_journey.json"
     
-    # We set the search to start on the current day at 6:30
+    # We set the search to start on the current day at the specified time_str (e.g., 06:30)
     now = datetime.now()
     current_date = now.strftime("%Y-%m-%d")
     
@@ -44,7 +50,7 @@ def get_journey_plan(origin, destination, time_str):
     try:
         print(f"[{now.isoformat()}] Step 1: Fetching scheduled journeys from {origin} to {destination} starting at {time_str}...")
         response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        response.raise_for_status() # This will raise an HTTPError for 403, 404, etc.
         
         json_data = response.json()
         return json_data
@@ -52,12 +58,6 @@ def get_journey_plan(origin, destination, time_str):
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Failed to fetch TAPI Journey Planner data: {e}")
         return None
-
-# [The rest of the utility functions (get_live_departures, format_time, etc.) remain unchanged]
-
-# --- PASTE THE REST OF THE UTILITY FUNCTIONS HERE ---
-# (get_live_departures, format_time, parse_duration, time_to_seconds, find_live_data)
-# ----------------------------------------------------------------------------------
 
 def get_live_departures(station_code):
     """
@@ -119,7 +119,7 @@ def time_to_seconds(time_str):
 def find_live_data(scheduled_departure_time, live_departures):
     """
     Matches the scheduled time (from Journey Planner) to a live service (from LDB).
-    This implements the strict "time not as planned" status logic.
+    Implements the strict "time not as planned" status logic.
     """
     
     # Scheduled time in seconds for easy comparison
@@ -144,9 +144,6 @@ def find_live_data(scheduled_departure_time, live_departures):
             
             # --- STRICT STATUS LOGIC: Check for delay or cancellation ---
             is_cancelled = service.get('cancelled', False)
-            # running_late = service.get('service', {}).get('running_late') # Not used for strict time check
-
-            # Get the expected time for the live status
             expected_time_str = service.get('expected', {}).get('departure', {}).get('time')
             
             if is_cancelled:
@@ -165,8 +162,8 @@ def find_live_data(scheduled_departure_time, live_departures):
             
     return default_live
 
-# ----------------------------------------------------------------------------------
 
+# --- Core Logic ---
 
 def process_journey_data(journey_data, filter_config):
     """Extract and format journey data from TAPI response, applying time and type filters."""
@@ -178,39 +175,37 @@ def process_journey_data(journey_data, filter_config):
     
     print(f"Found {len(live_departures_src)} live train services departing {ORIGIN_CRS}.")
     
-    for idx, route in enumerate(routes, 1):
+    for route in routes:
         
         # 1. ROUTE TYPE CHECK (Direct vs One Change)
         route_parts = route.get('route_parts', [])
         train_legs = [part for part in route_parts if part.get('mode') == 'train']
         route_type = "Direct" if len(train_legs) == 1 else "One Change"
         
-        # 2. DEPARTURE TIME CHECK (filter out journeys that depart too early/late)
+        # 2. DEPARTURE TIME CHECK 
         scheduled_departure_time = route.get('departure_time')
         dep_seconds = time_to_seconds(scheduled_departure_time)
         
-        # Convert filter times (7:20, 7:25) to seconds for comparison
-        target_time_seconds = time_to_seconds("07:25")
+        # --- FILTERS ---
         
-        # --- WEEKEND FILTER LOGIC ---
         if filter_config['is_weekend']:
-            # We want the *first* direct journey *after* 7:20 AM
+            # Weekend: First direct journey after 07:20
             target_after_seconds = time_to_seconds("07:20")
             
             # Skip if: 1) Not Direct OR 2) Departs before 7:20
             if route_type != "Direct" or dep_seconds < target_after_seconds:
                 continue
                 
-            # If we find the first valid direct journey, we take it and stop searching
+            # If we find the first valid direct journey, we take it and break
             if len(processed_journeys) >= 1:
                 break
                 
-        # --- WEEKDAY FILTER LOGIC ---
         else: # Weekday (Mon-Fri)
-            # We want the next *two indirect* journeys *after* 7:25 AM
+            # Weekday: Next two indirect journeys after 07:25
+            target_after_seconds = time_to_seconds("07:25")
             
             # Skip if: 1) Is Direct OR 2) Departs before 7:25
-            if route_type != "One Change" or dep_seconds < target_time_seconds:
+            if route_type != "One Change" or dep_seconds < target_after_seconds:
                 continue
             
             # Stop once we have the two indirect journeys
@@ -219,21 +214,17 @@ def process_journey_data(journey_data, filter_config):
         
         # If the journey passes all filters:
         
-        # Overall Journey Details
         total_duration = parse_duration(route.get('duration', '00:00:00'))
         scheduled_arrival_time = route.get('arrival_time')
         first_train_leg = train_legs[0]
         
-        # Get live data for the first train leg leaving Streatham Common
         live_info = find_live_data(first_train_leg.get('departure_time'), live_departures_src)
         
+        # Build the legs array
         processed_legs = []
-        
         if route_type == "Direct":
-            # Direct Train structure... (simplified for brevity)
             processed_legs.append({
-                "origin": "Streatham Common",
-                "destination": "Imperial Wharf",
+                "origin": ORIGIN_CRS, "destination": DESTINATION_CRS,
                 "scheduledDeparture": format_time(scheduled_departure_time),
                 "liveDeparture": live_info['live_time'],
                 "scheduledArrival": format_time(scheduled_arrival_time),
@@ -241,39 +232,24 @@ def process_journey_data(journey_data, filter_config):
                 "operator": first_train_leg.get('operator_name', 'Rail'),
                 "status": live_info['status']
             })
-
-        elif route_type == "One Change":
-            # Two-Train Journey structure... (simplified for brevity)
+        else:
+            # One Change logic (simplified for output)
             leg1 = train_legs[0]
             leg2 = train_legs[1]
             interchange = leg1.get('to_point_name', 'Clapham Junction')
             
-            # Leg 1: Streatham Common to Interchange (Live data applied here)
             processed_legs.append({
-                "origin": "Streatham Common",
-                "destination": interchange,
-                "scheduledDeparture": leg1.get('departure_time'),
-                "liveDeparture": live_info['live_time'],
-                "scheduledArrival": leg1.get('arrival_time'),
-                "departurePlatform": live_info['platform'],
-                "operator": leg1.get('operator_name', 'Rail'),
-                "status": live_info['status']
+                "origin": ORIGIN_CRS, "destination": interchange,
+                "scheduledDeparture": leg1.get('departure_time'), "liveDeparture": live_info['live_time'],
+                "scheduledArrival": leg1.get('arrival_time'), "departurePlatform": live_info['platform'],
+                "operator": leg1.get('operator_name', 'Rail'), "status": live_info['status']
             })
-            
-            # Transfer Detail (look for foot leg, etc.)
-            transfer_mins = 0 # Placeholder for transfer logic
-            processed_legs.append({"type": "transfer", "location": interchange, "transferTime": f"{transfer_mins} min"})
-            
-            # Leg 2: Interchange to Imperial Wharf 
+            processed_legs.append({"type": "transfer", "location": interchange, "transferTime": "Check schedule"})
             processed_legs.append({
-                "origin": interchange,
-                "destination": "Imperial Wharf",
-                "scheduledDeparture": leg2.get('departure_time'),
-                "liveDeparture": leg2.get('departure_time'), 
-                "scheduledArrival": leg2.get('arrival_time'),
-                "departurePlatform_Interchange": "TBC (Scheduled)", 
-                "operator": leg2.get('operator_name', 'Rail'),
-                "status": "On Time" 
+                "origin": interchange, "destination": DESTINATION_CRS,
+                "scheduledDeparture": leg2.get('departure_time'), "liveDeparture": leg2.get('departure_time'),
+                "scheduledArrival": leg2.get('arrival_time'), "departurePlatform_Interchange": "TBC (Scheduled)", 
+                "operator": leg2.get('operator_name', 'Rail'), "status": "On Time" 
             })
             
         processed_journeys.append({
@@ -303,7 +279,7 @@ def fetch_and_process_tapi_data():
     
     filter_config = {
         'is_weekend': is_weekend,
-        # We start the search at 6:30 AM to capture all relevant trains
+        # Set the search start time to the earliest cron time (06:30)
         'search_start_time': "06:30" 
     }
     
