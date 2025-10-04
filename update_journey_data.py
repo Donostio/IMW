@@ -2,17 +2,19 @@ import os
 import json
 import requests
 from datetime import datetime, timedelta
-from nredarwin.webservice import DarwinLdbSession # <--- NEW IMPORT
+# Import the Darwin LDB Session for live data
+from nredarwin.webservice import DarwinLdbSession
 
 # --- Configuration ---
 TFL_APP_ID = os.getenv("TFL_APP_ID", "")
 TFL_APP_KEY = os.getenv("TFL_APP_KEY", "")
+OUTPUT_FILE = "live_data.json"
 
 # --- DARWIN LDBWS Configuration ---
 # Read key from environment variable/GitHub Secret
-DARWIN_API_KEY = os.getenv("DARWIN_API_KEY", "") 
+DARWIN_API_KEY = os.getenv("DARWIN_API_KEY", "")
+# Recommended specific WSDL version
 DARWIN_WSDL = "https://lite.realtime.nationalrail.co.uk/OpenLDBWS/wsdl.aspx?ver=2021-01-01" 
-# Note: Using the recommended specific version.
 
 # CRS Codes for the journey stations (3-letter codes required for Darwin)
 STREATHAM_COMMON_CRS = "SRC" 
@@ -20,15 +22,12 @@ IMPERIAL_WHARF_CRS = "IMW"
 CLAPHAM_JUNCTION_CRS = "CLJ"
 
 # Journey parameters
-# ... (rest of your existing configuration)
-
-# Journey parameters
 ORIGIN = "Streatham Common Rail Station"
 DESTINATION = "Imperial Wharf Rail Station"
-
-# TFL API endpoint
 TFL_BASE_URL = "https://api.tfl.gov.uk"
 NUM_JOURNEYS = 4 # Target the next four journeys
+TFL_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+
 
 # --- Darwin Session Initialization ---
 try:
@@ -44,11 +43,12 @@ try:
 except Exception as e:
     DARWIN_SESSION = None
     print(f"ERROR initializing Darwin Session: {e}")
-    
+
+
 # --- Utility Functions ---
 
 def get_journey_plan(origin, destination):
-    """Fetch journey plans from TFL Journey Planner API and log the full response."""
+    """Fetch journey plans from TFL Journey Planner API."""
     url = f"{TFL_BASE_URL}/Journey/JourneyResults/{origin}/to/{destination}"
     
     params = {
@@ -70,237 +70,233 @@ def get_journey_plan(origin, destination):
         json_data = response.json()
         
         # --- VERBOSE LOGGING ---
-        print("\n" + "="*80)
-        print(">>> START TFL RAW JSON RESPONSE <<<")
-        print(json.dumps(json_data, indent=2))
-        print(">>> END TFL RAW JSON RESPONSE <<<")
-        print("="*80 + "\n")
-        # --- END VERBOSE LOGGING ---
+        # print(f"API Response Status: {response.status_code}")
+        # print(f"Response Keys: {json_data.keys()}")
+        # -----------------------
         
         return json_data
         
-    except requests.exceptions.RequestException as e:
-        print(f"ERROR: Failed to fetch TFL data: {e}")
+    except requests.exceptions.HTTPError as errh:
+        print(f"ERROR HTTP: {errh}")
+    except requests.exceptions.ConnectionError as errc:
+        print(f"ERROR Connecting: {errc}")
+    except requests.exceptions.Timeout as errt:
+        print(f"ERROR Timeout: {errt}")
+    except requests.exceptions.RequestException as err:
+        print(f"ERROR Unknown Request Error: {err}")
+    
+    return None
+
+
+def get_darwin_live_data(departure_crs, scheduled_dep_time, destination_crs):
+    """
+    Fetches live platform and estimated arrival time for a specific service 
+    by matching the scheduled departure time against the Darwin Departure Board.
+    """
+    if not DARWIN_SESSION:
         return None
 
-
-def parse_datetime(dt_string):
-    """Parse TFL datetime string."""
     try:
-        return datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
-    except (ValueError, AttributeError):
-        return None
-
-
-def format_time(dt):
-    """Format datetime to HH:MM."""
-    if dt:
-        return dt.strftime("%H:%M")
-    return "N/A"
-
-
-def extract_platform_from_instruction(instruction_text):
-    """Try to extract platform from instruction text (LAST RESORT fallback)."""
-    if not instruction_text:
-        return None
-    
-    text_lower = instruction_text.lower()
-    
-    # Look for "platform X" pattern
-    if 'platform' in text_lower:
-        parts = text_lower.split('platform')
-        if len(parts) > 1:
-            after = parts[1].strip()
-            platform = ''
-            for char in after:
-                # Allows for digits and single letters (e.g., Platform 1a)
-                if char.isdigit() or (char.isalpha() and len(platform) == 1):
-                    platform += char
-                elif platform:
-                    break
-            if platform:
-                return platform.upper()
-    return None
-
-
-def get_platform_from_leg(leg, is_departure=False):
-    """
-    Tries to extract platform from the leg details (TFL specific fields).
-    Prioritizes the 'indicator' field, which often holds the platform number.
-    """
-    
-    # Define the point we are checking (Departure or Arrival)
-    point = leg.get('departurePoint' if is_departure else 'arrivalPoint', {})
-    
-    # 1. PRIMARY CHECK: Check the 'indicator' field 
-    if point.get('indicator'):
-        platform_indicator = str(point['indicator']).upper()
-        if platform_indicator and platform_indicator != 'TBC':
-            return platform_indicator
-
-    # 2. Secondary Check: Check the 'platform' field 
-    if point.get('platform'):
-        platform_val = str(point['platform']).upper()
-        if platform_val and platform_val != 'TBC':
-            return platform_val
-
-    # 3. Tertiary Check: Check the 'platformName' field 
-    if point.get('platformName'):
-        name = str(point['platformName'])
-        if "Platform" in name:
-             platform_name_extracted = name.split('Platform')[-1].strip().upper()
-             if platform_name_extracted:
-                return platform_name_extracted
-        elif name and name.isalnum(): 
-            return name.upper()
-    
-    # 4. Fallback to Instruction Text (Least reliable)
-    instruction = leg.get('instruction', {})
-    instruction_text = instruction.get('detailed', instruction.get('summary', ''))
-    
-    platform_from_text = extract_platform_from_instruction(instruction_text)
-    if platform_from_text:
-        return platform_from_text
+        # Get the station departure board, filtered for the destination
+        board = DARWIN_SESSION.get_departures(
+            departure_crs, 
+            destination_crs=destination_crs,
+            rows=10 # Check the next 10 services to find a match
+        )
         
-    return None
+        tfl_dep_time = datetime.strptime(scheduled_dep_time, "%H:%M").time()
 
-# --- New/Modified Core Logic ---
+        for service in board.train_services:
+            # Darwin's scheduled time (std) might have an asterisk for uncertainty
+            scheduled_time_str = service.std.split('*')[0] 
+            
+            try:
+                darwin_scheduled_time = datetime.strptime(scheduled_time_str, "%H:%M").time()
+
+                # Match the service based on scheduled departure time
+                if darwin_scheduled_time == tfl_dep_time:
+                    
+                    # 1. Get initial departure platform (for leg 1 or Direct)
+                    departure_platform = service.platform.text if service.platform else 'TBC'
+                    
+                    # 2. Get the final ETA and Arrival Platform at the destination
+                    service_details = DARWIN_SESSION.get_service_details(service.service_id)
+                    
+                    # Find the specific calling point (the destination) to get the ETA/Platform
+                    live_arrival = 'Unknown'
+                    arrival_platform = 'TBC'
+                    
+                    if service_details and service_details.subsequent_calling_points:
+                        # Iterate through subsequent calling points to find the final destination
+                        for point in service_details.subsequent_calling_points.calling_point:
+                            if point.crs == destination_crs:
+                                # ETA (Estimated Time of Arrival) or STA (Scheduled Time of Arrival)
+                                live_arrival = point.eta.split('*')[0] if point.eta else point.sta
+                                arrival_platform = point.platform.text if point.platform else 'TBC'
+                                break
+                    
+                    return {
+                        'liveArrival': live_arrival,
+                        'departurePlatform': departure_platform,
+                        'arrivalPlatform': arrival_platform
+                    }
+
+            except ValueError:
+                # Skip services where scheduled time isn't HH:MM (e.g., 'Cancelled')
+                continue
+
+        return None # Service not found
+    
+    except Exception as e:
+        print(f"ERROR Darwin lookup failed for {departure_crs} to {destination_crs}: {e}")
+        return None
+
+def is_valid_train_journey(journey):
+    """Checks if the journey is a 'Direct' train or a 'One Change' train journey."""
+    rail_legs = [l for l in journey['legs'] if l['mode']['id'] in ['overground', 'national-rail']]
+    
+    if len(rail_legs) == 1:
+        return True, "Direct"
+    elif len(rail_legs) == 2:
+        # A two-leg train journey must have a transfer between them (a walking leg)
+        # Check if the middle leg is a transfer
+        if len(journey['legs']) == 3 and journey['legs'][1].get('mode', {}).get('id') == 'walking':
+            return True, "One Change"
+    
+    return False, "Not Rail"
+
 
 def process_journey(journey, journey_id):
-    """Process a TFL journey for direct or two-train routes."""
-    start_time = parse_datetime(journey.get('startDateTime'))
-    arrival_time = parse_datetime(journey.get('arrivalDateTime'))
-    duration_mins = journey.get('duration', 0)
+    """Extracts and standardizes key data from a single TFL journey."""
     
-    legs = journey.get('legs', [])
+    is_valid, journey_type = is_valid_train_journey(journey)
+    if not is_valid:
+        return None # Skip invalid journeys
+        
+    journey_legs = journey['legs']
+    train_legs = [l for l in journey_legs if l['mode']['id'] in ['overground', 'national-rail']]
     
-    # Filter for only rail legs (National Rail or Overground)
-    rail_legs = [
-        leg for leg in legs 
-        if leg.get('mode', {}).get('name', '') in ['national-rail', 'overground']
-    ]
+    # Initial values from TFL
+    journey_start_time = datetime.strptime(journey['startDateTime'], TFL_TIME_FORMAT).strftime("%H:%M")
+    journey_end_time = datetime.strptime(journey['arrivalDateTime'], TFL_TIME_FORMAT).strftime("%H:%M")
+    total_duration = f"{journey['duration']} min"
+    status = journey_legs[0].get('status', 'On Time')
     
-    if not rail_legs:
-        return None
+    # Overwrite these with live Darwin data if available
+    overall_arrival_time = journey_end_time
     
-    # Check for multi-modal (non-train/non-walk) legs which should be excluded
-    allowed_modes = ['walking', 'walk', 'national-rail', 'overground']
-    if any(leg.get('mode', {}).get('name', '') not in allowed_modes for leg in legs):
-        return None
+    legs = []
+    
+    # Map TFL names to CRS codes (Crucial for Darwin)
+    CRS_MAP = {
+        "Streatham Common Rail Station": STREATHAM_COMMON_CRS,
+        "Imperial Wharf Rail Station": IMPERIAL_WHARF_CRS,
+        "Clapham Junction Rail Station": CLAPHAM_JUNCTION_CRS,
+    }
 
-    # --- REVISED STATUS LOGIC: Focus ONLY on Timing Delays ---
-    status = "On Time"
-    
-    # Check if any leg has an explicitly reported arrival delay greater than 60 seconds (1 minute).
-    # This filters out minor fluctuations and general station advisories.
-    has_explicit_delay = any(
-        leg.get('arrivalPoint', {}).get('timing', {}).get('arrivalDelay', 0) > 60 
-        for leg in legs
-    )
-    
-    if has_explicit_delay:
-        status = "Delayed" 
-    # --- END REVISED STATUS LOGIC ---
+    for leg_idx, leg in enumerate(journey_legs):
+        
+        # --- Handle Train/Rail Legs ---
+        if leg['mode']['id'] in ['overground', 'national-rail']:
+            origin_name = leg['departurePoint']['commonName']
+            destination_name = leg['arrivalPoint']['commonName']
             
-    processed_legs = []
-    transfer_mins = 0
+            # Scheduled times from TFL
+            scheduled_dep = datetime.strptime(leg['scheduledDepartureTime'], TFL_TIME_FORMAT).strftime("%H:%M")
+            scheduled_arr = datetime.strptime(leg['scheduledArrivalTime'], TFL_TIME_FORMAT).strftime("%H:%M")
+            
+            operator = leg['instruction'].get('summary', 'Rail Operator')
+            
+            leg_data = {
+                "origin": origin_name.replace(" Rail Station", ""),
+                "destination": destination_name.replace(" Rail Station", ""),
+                "departure": scheduled_dep,
+                "arrival": scheduled_arr,
+                "operator": operator.split('(')[0].strip(), # Clean up operator name
+                "status": leg.get('status', 'On Time'),
+            }
+            
+            # Get CRS codes for Darwin lookup
+            origin_crs = CRS_MAP.get(origin_name)
+            destination_crs = CRS_MAP.get(destination_name)
 
-    # --- Direct Train (1 rail leg) ---
-    if len(rail_legs) == 1:
-        leg1 = rail_legs[0]
-        leg1_depart = parse_datetime(leg1.get('departureTime'))
-        leg1_arrive = parse_datetime(leg1.get('arrivalTime'))
-        leg1_route = leg1.get('routeOptions', [])
-        leg1_line = leg1_route[0].get('name', 'Rail') if leg1_route else 'Rail'
-        
-        # Departure platform (at Streatham Common)
-        leg1_platform = get_platform_from_leg(leg1, is_departure=True)
-        
-        processed_legs.append({
-            "origin": "Streatham Common",
-            "destination": "Imperial Wharf",
-            "departure": format_time(leg1_depart),
-            "arrival": format_time(leg1_arrive),
-            "departurePlatform": leg1_platform or "TBC",
-            "operator": leg1_line,
-            "status": status
-        })
+            # --- DARWIN INTEGRATION ---
+            if origin_crs and destination_crs:
+                darwin_data = get_darwin_live_data(origin_crs, scheduled_dep, destination_crs)
+                
+                if darwin_data:
+                    # 1. Update leg details with live data
+                    leg_data["live_arrival"] = darwin_data['liveArrival']
+                    leg_data["departurePlatform"] = darwin_data['departurePlatform']
+                    leg_data["arrivalPlatform"] = darwin_data['arrivalPlatform']
+                    
+                    # 2. Update the transfer point platforms (e.g., at Clapham Junction)
+                    if journey_type == 'One Change':
+                        if leg_idx == 0:
+                            # First train leg (SRC -> CLJ): Update CLJ arrival platform
+                            leg_data["arrivalPlatform_ClaphamJunction"] = darwin_data['arrivalPlatform']
+                        elif leg_idx == 2: # This assumes the transfer is leg 1 and is skipped below
+                            # Second train leg (CLJ -> IMW): Update CLJ departure platform
+                            leg_data["departurePlatform_ClaphamJunction"] = darwin_data['departurePlatform']
 
-    # --- Two-Train Journey (2 rail legs) ---
-    elif len(rail_legs) == 2:
-        
-        # Leg 1: Streatham Common to Interchange (e.g. Clapham Junction)
-        leg1 = rail_legs[0]
-        leg1_depart = parse_datetime(leg1.get('departureTime'))
-        leg1_arrive = parse_datetime(leg1.get('arrivalTime'))
-        leg1_route = leg1.get('routeOptions', [])
-        leg1_line = leg1_route[0].get('name', 'Rail') if leg1_route else 'Rail'
+                    # 3. Update the overall journey arrival time with the final leg's live arrival
+                    if leg == train_legs[-1]: # Check if this is the last train leg
+                        overall_arrival_time = darwin_data['liveArrival']
+                        # Recalculate duration based on the live arrival time
+                        try:
+                            # TFL departure time and live arrival time
+                            dep_dt = datetime.strptime(journey_start_time, "%H:%M")
+                            arr_dt = datetime.strptime(overall_arrival_time, "%H:%M")
+                            
+                            # Handle midnight wrap-around for duration calculation
+                            if arr_dt < dep_dt:
+                                arr_dt += timedelta(days=1)
+                                
+                            total_duration_minutes = (arr_dt - dep_dt).total_seconds() / 60
+                            total_duration = f"{int(total_duration_minutes)} min"
+                        except ValueError:
+                            # Fallback if live_arrival is 'Unknown' or invalid
+                            pass
+                
+                else:
+                    # Darwin failed or service not found - fall back to TFL scheduled data and TBC platforms
+                    leg_data["live_arrival"] = scheduled_arr
+                    leg_data["departurePlatform"] = "TBC"
+                    leg_data["arrivalPlatform"] = "TBC"
+            else:
+                # If CRS codes are missing (should not happen with the defined journeys)
+                leg_data["live_arrival"] = scheduled_arr
+                leg_data["departurePlatform"] = "TBC"
+                leg_data["arrivalPlatform"] = "TBC"
 
-        # Leg 2: Interchange to Imperial Wharf
-        leg2 = rail_legs[1]
-        leg2_depart = parse_datetime(leg2.get('departureTime'))
-        leg2_arrive = parse_datetime(leg2.get('arrivalTime'))
-        leg2_route = leg2.get('routeOptions', [])
-        leg2_line = leg2_route[0].get('name', 'Rail') if leg2_route else 'Rail'
+            legs.append(leg_data)
 
-        # Interchange Station (e.g., Clapham Junction)
-        interchange = leg1.get('arrivalPoint', {}).get('commonName', 'Interchange')
-
-        # Platform Extraction at Interchange
-        leg1_arrival_platform = get_platform_from_leg(leg1, is_departure=False)
-        leg2_departure_platform = get_platform_from_leg(leg2, is_departure=True)
-
-        # Calculate transfer time
-        if leg1_arrive and leg2_depart:
-            transfer_mins = int((leg2_depart - leg1_arrive).total_seconds() / 60)
-        
-        # First Train Leg
-        processed_legs.append({
-            "origin": "Streatham Common",
-            "destination": interchange,
-            "departure": format_time(leg1_depart),
-            "arrival": format_time(leg1_arrive),
-            "arrivalPlatform_ClaphamJunction": leg1_arrival_platform or "TBC",
-            "operator": leg1_line,
-            "status": status
-        })
-        
-        # Transfer Detail
-        processed_legs.append({
-            "type": "transfer",
-            "location": interchange,
-            "transferTime": f"{transfer_mins} min"
-        })
-        
-        # Second Train Leg
-        processed_legs.append({
-            "origin": interchange,
-            "destination": "Imperial Wharf",
-            "departure": format_time(leg2_depart),
-            "arrival": format_time(leg2_arrive),
-            "departurePlatform_ClaphamJunction": leg2_departure_platform or "TBC",
-            "operator": leg2_line,
-            "status": status
-        })
-
-    else:
-        # Exclude journeys with 0, 3, or more rail legs
-        return None
-
+        # --- Handle Transfer/Walking Legs ---
+        elif leg['mode']['id'] == 'walking':
+            transfer_time = f"{leg['duration']} min"
+            location = leg['departurePoint']['commonName']
+            
+            legs.append({
+                "type": "transfer",
+                "location": location.replace(" Rail Station", ""),
+                "transferTime": transfer_time,
+            })
+            
+    # Return the dictionary with the potentially updated overall_arrivalTime and totalDuration
     return {
         "id": journey_id,
-        "type": "Direct" if len(rail_legs) == 1 else "One Change",
-        "departureTime": format_time(start_time),
-        "arrivalTime": format_time(arrival_time),
-        "totalDuration": f"{duration_mins} min",
+        "type": journey_type,
+        "departureTime": journey_start_time,
+        "arrivalTime": overall_arrival_time, # Now the live estimated arrival time
+        "totalDuration": total_duration,     # Now based on the live arrival
         "status": status,
         "live_updated_at": datetime.now().strftime("%H:%M:%S"),
-        "legs": processed_legs
+        "legs": legs
     }
 
 
 def fetch_and_process_tfl_data(num_journeys):
-    """Fetch and process TFL journey data for a fixed number of valid train journeys."""
+    """Fetches TFL data, processes it, and returns data for a fixed number of valid train journeys."""
     
     journey_data = get_journey_plan(ORIGIN, DESTINATION)
     
@@ -337,7 +333,7 @@ def main():
             json.dump(data, f, indent=4)
         print(f"\n✓ Successfully saved {len(data)} journeys to {OUTPUT_FILE}")
     else:
-        print("\n⚠ No journey data generated.")
+        print("\n⚠ Could not generate journey data. Check API keys and logs.")
 
 
 if __name__ == "__main__":
