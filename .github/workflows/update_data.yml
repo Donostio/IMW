@@ -1,22 +1,18 @@
 name: Update Live Journey Data
 on:
+  push:
+    branches: [ main ]
   schedule:
-    # Weekday runs (Monday to Friday, 06:30, 06:40, 06:50, 06:55, 07:00, 07:05, 07:10, 07:15 UTC)
-    # Note: Times are UTC. London is UTC+1 during BST, so 05:30 UTC is 06:30 BST.
-    - cron: '30 5 * * 1-5' # 06:30 BST
-    - cron: '40 5 * * 1-5' # 06:40 BST
-    - cron: '50 5 * * 1-5' # 06:50 BST
-    - cron: '55 5 * * 1-5' # 06:55 BST
-    - cron: '0 6 * * 1-5'  # 07:00 BST
-    - cron: '5 6 * * 1-5'  # 07:05 BST
-    - cron: '10 6 * * 1-5' # 07:10 BST
-    - cron: '15 6 * * 1-5' # 07:15 BST
-  
-  # Run once a day on Saturday and Sunday to catch the weekend logic
-  - cron: '30 6 * * 6,0' # Saturday and Sunday at 07:30 BST (6:30 UTC)
-
-  # Allows manual run from the GitHub Actions tab
-  workflow_dispatch: {}
+    - cron: '30 5 * * 1-5'
+    - cron: '40 5 * * 1-5'
+    - cron: '50 5 * * 1-5'
+    - cron: '55 5 * * 1-5'
+    - cron: '0 6 * * 1-5'
+    - cron: '5 6 * * 1-5'
+    - cron: '10 6 * * 1-5'
+    - cron: '15 6 * * 1-5'
+    - cron: '30 6 * * 6,0'
+  workflow_dispatch:
 
 jobs:
   update-data:
@@ -39,7 +35,6 @@ jobs:
       - name: Run TAPI data update script
         run: python update_journey_data.py
         env:
-          # IMPORTANT: These securely pull the values from your repository secrets
           TAPI_APP_ID: ${{ secrets.TAPI_APP_ID }}
           TAPI_APP_KEY: ${{ secrets.TAPI_APP_KEY }}
           
@@ -48,6 +43,7 @@ jobs:
         with:
           commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
+
 
 
 
