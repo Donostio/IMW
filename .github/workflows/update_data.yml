@@ -1,13 +1,9 @@
 name: Update Live Journey Data
 
 on:
-  # Schedule to run at the specific times requested (Mon-Fri)
   schedule:
     # Weekday runs (Monday to Friday, 06:30, 06:40, 06:50, 06:55, 07:00, 07:05, 07:10, 07:15 UTC)
-    # The API calls themselves use datetime.now() so they search for current trains.
-    # Note: Times are UTC. London is UTC+1 during BST, so 06:30 UTC is 07:30 BST (too late for 6:30 run)
-    # Adjusting to run 1 hour earlier to match desired 6:30 AM BST start.
-    # 05:30 UTC is 06:30 BST
+    # Note: Times are UTC. London is UTC+1 during BST, so 05:30 UTC is 06:30 BST.
     - cron: '30 5 * * 1-5' # 06:30 BST
     - cron: '40 5 * * 1-5' # 06:40 BST
     - cron: '50 5 * * 1-5' # 06:50 BST
@@ -53,6 +49,7 @@ jobs:
         with:
           commit_message: Update live_data.json with morning rail data
           file_pattern: live_data.json
+
 
 
 
